@@ -1,45 +1,43 @@
 """
 console.py  --  the terminal side of Maha Transcribe.
 
-A server left running should not be a wall of log lines quit with a
-two-finger interrupt. This is a live console: one keypress per command, a
-dashboard that redraws in place, and the same amber on near-black the page
-uses.
+Rebuilt 4.9.2026 to match MAHA_COMMUTE's own server console
+(day-commute's `main()`), after the previous design -- a live-redrawing
+box dashboard with fixed-width bordered panels -- silently lost most of
+its own KEYS row on a narrow Termux screen. A panel built to a fixed
+inner width truncates whatever does not fit, and on a ~40 column phone
+terminal that meant "[Q] quit" was the only key left on screen; O, U, R
+and C were still bound, just invisible.
 
-Follows the house pattern from GDRIVE_DOWNLOADER_FLASK_MACOS and the block
-logo already established in MAHA_TRANSCRIBE_TERMUX_TERMINAL's own README.
-Same keys, same shape, because a control that behaves differently depending
-on which app you found it in is the thing modules/design-language.md
-exists to prevent.
+MAHA_COMMUTE never had that failure mode, because it never draws a box.
+It prints a handful of plain lines once, lets the terminal scroll and
+wrap the way terminals already know how to, and reacts to key presses
+by printing a NEW line rather than repainting an old one. There is no
+width this can silently lose content to.
 
-Smaller than the original by design: this app keeps no server-side job
-state at all, every key, transcript and setting lives in the browser, so
-there is nothing here to pause, verify or sign in to. The dashboard shows
-what is actually true of this process: version, address, uptime, and how
-many requests it has answered.
+    q            quit
+    o            open the page again
+    u            check for an update, confirm, then update and restart
+    r            restart
 
-DEGRADES HONESTLY. If stdout is not a terminal -- piped to a file, run
-under a service manager, run from an editor -- there is no cursor to hide
-and no key to press, so it prints plain lines instead and never draws a
-frame.
+DEGRADES HONESTLY. If stdout is not a terminal, there is no key to
+press, so it prints the address and serves, exactly as MAHA_COMMUTE does.
 """
 
 import os
-import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
 
-RESET = "\033[0m"
-_ANSI = re.compile(r"\033\[[0-9;]*m")
-
-
-def vlen(s):
-    """Length as the eye sees it: colour codes take no space on screen."""
-    return len(_ANSI.sub("", s))
-
+# same palette the app itself and the rest of this server use, so a
+# person moving between the browser tab and the terminal sees one look
+AMBER = "\033[38;5;214m"
+SAND = "\033[38;5;223m"
+SLATE = "\033[38;5;245m"
+RED = "\033[38;5;203m"
+OFF = "\033[0m"
 
 LOGO = [
     "███╗   ███╗ █████╗ ██╗  ██╗ █████╗ ",
@@ -50,43 +48,21 @@ LOGO = [
     "╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝",
 ]
 
-TL, TR, BL, BR, H, V = "\u256D", "\u256E", "\u2570", "\u256F", "\u2500", "\u2502"
+
+def w(s, colour, enabled=True):
+    return f"{colour}{s}{OFF}" if enabled else s
 
 
-class Paint:
-    """Colour, degrading honestly: truecolor, then 256, then nothing at all
-    when the output is redirected to a file."""
-
-    def __init__(self, enabled):
-        self.on = enabled
-        self.true = enabled and (
-            os.environ.get("COLORTERM", "") in ("truecolor", "24bit"))
-
-    def _rgb(self, r, g, b, code):
-        if not self.on:
-            return ""
-        if self.true:
-            return f"\033[38;2;{r};{g};{b}m"
-        return f"\033[38;5;{code}m"
-
-    def amber(self):  return self._rgb(0xF5, 0x9E, 0x0B, 214)
-    def sand(self):   return self._rgb(0xF2, 0xDD, 0xB4, 223)
-    def slate(self):  return self._rgb(0x6B, 0x7E, 0x90, 245)
-    def red(self):    return self._rgb(0xEF, 0x44, 0x44, 203)
-    def reset(self):  return RESET if self.on else ""
-
-    def w(self, s, colour):
-        return f"{colour}{s}{self.reset()}" if self.on else s
+def say(line=""):
+    print(line, flush=True)
 
 
 def open_page(port):
-    """Open the page, on whichever platform this is."""
     url = f"http://127.0.0.1:{port}"
-    for cmd in (["open", url], ["xdg-open", url], ["termux-open-url", url]):
+    for cmd in (["termux-open-url", url], ["open", url], ["xdg-open", url]):
         if shutil.which(cmd[0]):
             try:
-                subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL)
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return True
             except Exception:
                 pass
@@ -111,212 +87,142 @@ def quiet_flask():
         pass
 
 
-def hms(sec):
-    if sec is None or sec < 0:
-        return "\u2014"
-    sec = int(sec)
-    h, m = sec // 3600, (sec % 3600) // 60
-    if h:
-        return f"{h}h {m}m"
-    if m:
-        return f"{m}m {sec % 60}s"
-    return f"{sec}s"
-
-
-class Console:
-    """The dashboard. Redraws in place; never scrolls."""
-
-    def __init__(self, paint, port, snapshot):
-        self.p = paint
-        self.port = port
-        self.snapshot = snapshot          # callable -> dict
-        self.prev_lines = 0
-        self.msg = {"text": "", "kind": "", "until": 0.0}
-
-    def flash(self, text, kind="", seconds=4):
-        self.msg.update(text=text, kind=kind, until=time.time() + seconds)
-
-    def width(self):
-        try:
-            return max(46, min(shutil.get_terminal_size().columns, 100))
-        except Exception:
-            return 60
-
-    def panel(self, title, rows, w):
-        p = self.p
-        inner = w - 2
-        t = f" {title} "
-        top = TL + H + p.w(t, p.amber()) + H * max(0, inner - len(t) - 1) + TR
-        out = [top]
-        for r in rows:
-            body = r
-            if vlen(body) > inner - 2:
-                body = body[:inner - 2]
-            pad = max(0, inner - 1 - vlen(body))
-            out.append(V + " " + body + " " * pad + V)
-        out.append(BL + H * inner + BR)
-        return out
-
-    def lines(self):
-        p = self.p
-        w = self.width()
-        out = []
-
-        for row in LOGO:
-            out.append(p.w(row, p.amber()))
-        out.append("")
-        out.append(p.w("  Maha Transcribe", p.sand())
-                   + p.w("   \u00b7   " + f"http://127.0.0.1:{self.port}", p.slate()))
-        out.append("")
-
-        s = self.snapshot() if self.snapshot else {}
-        ffmpeg_line = (p.w("ffmpeg ready", p.sand()) if s.get("ffmpeg")
-                      else p.w("ffmpeg NOT found, file picker cannot convert", p.red()))
-        rows = [
-            p.w(f"version {s.get('version', '?')}", p.sand())
-            + p.w("   \u00b7   up " + hms(s.get("uptime")), p.slate()),
-            p.w(f"{s.get('requests', 0)} request(s) answered", p.slate()),
-            ffmpeg_line,
-        ]
-        if s.get("optimized"):
-            rows.append(p.w(f"{s['optimized']} file(s) optimized, "
-                            f"{s.get('saved_mb', 0):.1f} MB saved", p.slate()))
-        out += self.panel("STATUS", rows, w)
-        out.append("")
-
-        keys = [("Q", "quit"), ("O", "open page"), ("U", "update"), ("R", "restart"), ("C", "redraw")]
-        krow = "   ".join(
-            f"{p.w('[' + k + ']', p.amber())} {p.w(v, p.sand())}"
-            for k, v in keys)
-        out += self.panel("KEYS", [krow], w)
-
-        if self.msg["text"] and time.time() < self.msg["until"]:
-            colour = p.red() if self.msg["kind"] == "err" else p.amber()
-            out.append("  " + p.w(self.msg["text"][:w - 4], colour))
-        else:
-            out.append("")
-        return out
-
-    def render(self):
-        lines = self.lines()
-        buf = []
-        if self.prev_lines:
-            buf.append(f"\033[{self.prev_lines}A")
-        for ln in lines:
-            buf.append("\033[2K" + ln + "\n")
-        sys.stdout.write("".join(buf))
-        sys.stdout.flush()
-        self.prev_lines = len(lines)
-
-
 def is_interactive():
     return sys.stdout.isatty() and sys.stdin.isatty()
 
 
+def _print_banner(port, colour, snap):
+    for row in LOGO:
+        say(w(row, AMBER, colour))
+    say()
+    say("  " + w("Maha Transcribe", SAND, colour) + "   \u00b7   " +
+        w(f"http://127.0.0.1:{port}", SLATE, colour))
+    s = snap() if snap else {}
+    ffmpeg_line = (w("ffmpeg ready", SLATE, colour) if s.get("ffmpeg")
+                  else w("ffmpeg NOT found, the file picker cannot convert", RED, colour))
+    say("  version " + str(s.get("version", "?")) + "   \u00b7   " + ffmpeg_line)
+    say()
+
+
+def _print_keys(colour):
+    say("  " + w("q", AMBER, colour) + " quit   " +
+        w("o", AMBER, colour) + " open page   " +
+        w("u", AMBER, colour) + " check for update   " +
+        w("r", AMBER, colour) + " restart")
+    try:
+        cols = shutil.get_terminal_size((40, 20)).columns
+    except Exception:
+        cols = 40
+    say(w("\u0950" + "\u2500" * max(cols - 3, 0), AMBER, colour))
+
+
 def run(app, host, port, snapshot=None, note=None, on_check_update=None, on_perform_update=None):
-    """Serve, with the console if there is a terminal to draw it on.
+    """Serve, printing plain lines rather than drawing a box.
 
-    Returns "quit" or "restart".
-
-    on_check_update() -> dict, on_perform_update() -> str. Both may raise;
-    the console shows the message and never crashes over an update that
-    could not be checked or could not land. Passed in rather than imported,
-    so this module still has no idea what an "update" actually is.
+    Returns "quit" or "restart". on_check_update() -> dict,
+    on_perform_update() -> str; both may raise, and a failure is printed
+    as one more plain line rather than crashing the console.
     """
     quiet_flask()
+    colour = is_interactive()
 
-    if note and not is_interactive():
-        print(note, flush=True)
+    if note:
+        say(note)
+    _print_banner(port, colour, snapshot)
+
     if not is_interactive():
-        print(f"Maha Transcribe \u2014 http://127.0.0.1:{port}", flush=True)
-        app.run(host=host, port=port, threaded=True, debug=False,
-                use_reloader=False)
+        say(f"Maha Transcribe \u2014 http://127.0.0.1:{port}")
+        app.run(host=host, port=port, threaded=True, debug=False, use_reloader=False)
         return "quit"
 
-    import select
-    import termios
-    import tty
+    _print_keys(colour)
 
     threading.Thread(
         target=lambda: app.run(host=host, port=port, threaded=True,
                                debug=False, use_reloader=False),
         daemon=True).start()
-
-    paint = Paint(True)
-    con = Console(paint, port, snapshot)
-    if note:
-        con.msg.update(text=note, kind="", until=time.time() + 90)
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    sys.stdout.write("\033[?25l\033[2J\033[H")
-
     threading.Timer(1.0, open_page, args=(port,)).start()
 
-    # set by U while an update is offered; the NEXT keypress answers yes/no
-    # instead of being read as a normal command, so a stray key cannot start
-    # an update by accident -- it has to land on this exact question
-    awaiting_confirm = False
+    import select
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+
+    # set while an update is offered; the very next keypress answers that
+    # question instead of being read as a command, so a stray key afterwards
+    # cannot start (or skip) an update by accident
+    awaiting_confirm = [False]
+    pending_check = [None]
+
+    def handle_update_check():
+        say()
+        say("  checking for an update\u2026")
+        try:
+            info = on_check_update()
+        except Exception as e:                                   # noqa: BLE001
+            say("  " + w("could not check: " + str(e), RED, colour))
+            return
+        if info["up_to_date"]:
+            say("  " + w(f"v{info['installed']} is already the latest version", SLATE, colour))
+            return
+        say("  " + w(f"v{info['installed']} installed", SAND, colour) +
+            "   \u2192   " + w(f"v{info['latest']} available", AMBER, colour))
+        say("  press " + w("y", AMBER, colour) + " to update, any other key cancels")
+        pending_check[0] = info
+        awaiting_confirm[0] = True
+
+    def handle_update_confirm(ch):
+        info = pending_check[0]
+        awaiting_confirm[0] = False
+        if ch != "y":
+            say("  update canceled")
+            return None
+        say(f"  updating v{info['installed']} \u2192 v{info['latest']}\u2026")
+        say("  pulling\u2026")
+        try:
+            msg = on_perform_update()
+        except Exception as e:                                   # noqa: BLE001
+            say("  " + w("update failed: " + str(e), RED, colour))
+            return None
+        say("  " + w(msg, SLATE, colour))
+        say("  " + w(f"updated to v{info['latest']}, restarting\u2026", AMBER, colour))
+        time.sleep(1.0)
+        return "restart"
 
     action = "quit"
     try:
         tty.setcbreak(fd)
         while True:
-            con.render()
             r, _, _ = select.select([fd], [], [], 0.5)
             if not r:
                 continue
             ch = os.read(fd, 1).decode(errors="ignore").lower()
 
-            if awaiting_confirm:
-                awaiting_confirm = False
-                if ch == "y" and on_perform_update:
-                    con.flash("updating\u2026", "")
-                    con.render()
-                    try:
-                        msg = on_perform_update()
-                        con.flash("updated: " + msg + " \u2014 restarting", "")
-                        con.render()
-                        time.sleep(1.2)
-                        action = "restart"
-                        break
-                    except Exception as e:                       # noqa: BLE001
-                        con.flash("update failed: " + str(e), "err")
-                else:
-                    con.flash("update canceled", "")
+            if awaiting_confirm[0]:
+                result = handle_update_confirm(ch)
+                if result:
+                    action = result
+                    break
                 continue
 
             if ch in ("q", "\x03", "\x04"):
                 action = "quit"
                 break
             if ch == "r":
+                say("  restarting\u2026")
                 action = "restart"
                 break
             if ch == "o":
                 ok = open_page(port)
-                con.flash("opening the browser" if ok
-                          else "no way to open a browser from here",
-                          "" if ok else "err")
+                say("  " + ("opening the browser" if ok else
+                            w("no way to open a browser from here", RED, colour)))
             elif ch == "u" and on_check_update:
-                con.flash("checking for an update\u2026", "")
-                con.render()
-                try:
-                    info = on_check_update()
-                    if info["up_to_date"]:
-                        con.flash(f"v{info['installed']} is already the latest version", "")
-                    else:
-                        con.flash(f"v{info['installed']} installed, v{info['latest']} "
-                                  f"available \u2014 press Y to update, any other key cancels", "", seconds=120)
-                        awaiting_confirm = True
-                except Exception as e:                            # noqa: BLE001
-                    con.flash("could not check: " + str(e), "err")
-            elif ch == "c":
-                con.prev_lines = 0
-                sys.stdout.write("\033[2J\033[H")
+                handle_update_check()
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        sys.stdout.write("\033[?25h\n")
-        sys.stdout.flush()
 
     if action == "quit":
-        print(paint.w("  stopped.", paint.slate()))
+        say(w("  stopped.", SLATE, colour))
     return action

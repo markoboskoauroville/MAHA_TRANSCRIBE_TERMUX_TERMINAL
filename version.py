@@ -11,4 +11,4 @@ it without importing app.py itself -- app.py imports selfupdate.py, and a
 module that imports the thing that imports it is a circular import.
 """
 
-APP_VERSION = 3
+APP_VERSION = 4
