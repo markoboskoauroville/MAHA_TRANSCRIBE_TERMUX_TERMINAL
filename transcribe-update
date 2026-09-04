@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# The `transcribe-update` command: pulls the latest version of the app.
+set -euo pipefail
+
+# resolve to the real repo directory even when this file is a symlink in PATH
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+REPO_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+
+echo "updating maha transcribe..."
+cd "$REPO_DIR"
+if [[ ! -d .git ]]; then
+  echo "not a git checkout ($REPO_DIR has no .git), cannot self-update"
+  echo "reinstall with the install script instead"
+  exit 1
+fi
+git fetch --quiet origin
+LOCAL="$(git rev-parse @)"
+REMOTE="$(git rev-parse @{u})"
+if [[ "$LOCAL" == "$REMOTE" ]]; then
+  echo "already up to date"
+else
+  git pull --ff-only
+  echo "updated"
+fi

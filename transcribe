@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# The `transcribe` command: starts the app.
+# For updates use `transcribe-update` instead.
+set -euo pipefail
+
+# resolve to the real repo directory even when this file is a symlink in PATH
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+REPO_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+
+PORT="${1:-8420}"
+exec python3 "$REPO_DIR/server.py" "$PORT"
