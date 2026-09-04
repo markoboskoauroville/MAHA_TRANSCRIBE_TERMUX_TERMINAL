@@ -1,5 +1,5 @@
 """
-Maha Transcribe -- v1
+Maha Transcribe
 Mantra Productions
 
 A Flask front end for one job: hand the browser maha_transcribe.html over
@@ -27,8 +27,10 @@ import audioprep
 import console as term
 import localguard
 import portpick
+import selfupdate
+import version
 
-APP_VERSION = 2                        # one whole number, per modules/versioning.md
+APP_VERSION = version.APP_VERSION      # one whole number, per modules/versioning.md
 DEFAULT_PORT = 8420
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -143,6 +145,7 @@ if __name__ == "__main__":
     LIVE_PORT, port_note = portpick.pick("127.0.0.1", requested)
 
     action = term.run(app, "127.0.0.1", LIVE_PORT, snapshot=console_snapshot,
-                      note=port_note)
+                      note=port_note, on_check_update=selfupdate.check_remote,
+                      on_perform_update=selfupdate.perform_update)
     if action == "restart":
         os.execv(sys.executable, [sys.executable] + sys.argv)

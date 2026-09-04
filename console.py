@@ -133,8 +133,8 @@ class Console:
         self.prev_lines = 0
         self.msg = {"text": "", "kind": "", "until": 0.0}
 
-    def flash(self, text, kind=""):
-        self.msg.update(text=text, kind=kind, until=time.time() + 4)
+    def flash(self, text, kind="", seconds=4):
+        self.msg.update(text=text, kind=kind, until=time.time() + seconds)
 
     def width(self):
         try:
@@ -184,7 +184,7 @@ class Console:
         out += self.panel("STATUS", rows, w)
         out.append("")
 
-        keys = [("Q", "quit"), ("O", "open page"), ("R", "restart"), ("C", "redraw")]
+        keys = [("Q", "quit"), ("O", "open page"), ("U", "update"), ("R", "restart"), ("C", "redraw")]
         krow = "   ".join(
             f"{p.w('[' + k + ']', p.amber())} {p.w(v, p.sand())}"
             for k, v in keys)
@@ -213,10 +213,15 @@ def is_interactive():
     return sys.stdout.isatty() and sys.stdin.isatty()
 
 
-def run(app, host, port, snapshot=None, note=None):
+def run(app, host, port, snapshot=None, note=None, on_check_update=None, on_perform_update=None):
     """Serve, with the console if there is a terminal to draw it on.
 
     Returns "quit" or "restart".
+
+    on_check_update() -> dict, on_perform_update() -> str. Both may raise;
+    the console shows the message and never crashes over an update that
+    could not be checked or could not land. Passed in rather than imported,
+    so this module still has no idea what an "update" actually is.
     """
     quiet_flask()
 
@@ -247,6 +252,11 @@ def run(app, host, port, snapshot=None, note=None):
 
     threading.Timer(1.0, open_page, args=(port,)).start()
 
+    # set by U while an update is offered; the NEXT keypress answers yes/no
+    # instead of being read as a normal command, so a stray key cannot start
+    # an update by accident -- it has to land on this exact question
+    awaiting_confirm = False
+
     action = "quit"
     try:
         tty.setcbreak(fd)
@@ -256,6 +266,25 @@ def run(app, host, port, snapshot=None, note=None):
             if not r:
                 continue
             ch = os.read(fd, 1).decode(errors="ignore").lower()
+
+            if awaiting_confirm:
+                awaiting_confirm = False
+                if ch == "y" and on_perform_update:
+                    con.flash("updating\u2026", "")
+                    con.render()
+                    try:
+                        msg = on_perform_update()
+                        con.flash("updated: " + msg + " \u2014 restarting", "")
+                        con.render()
+                        time.sleep(1.2)
+                        action = "restart"
+                        break
+                    except Exception as e:                       # noqa: BLE001
+                        con.flash("update failed: " + str(e), "err")
+                else:
+                    con.flash("update canceled", "")
+                continue
+
             if ch in ("q", "\x03", "\x04"):
                 action = "quit"
                 break
@@ -267,6 +296,19 @@ def run(app, host, port, snapshot=None, note=None):
                 con.flash("opening the browser" if ok
                           else "no way to open a browser from here",
                           "" if ok else "err")
+            elif ch == "u" and on_check_update:
+                con.flash("checking for an update\u2026", "")
+                con.render()
+                try:
+                    info = on_check_update()
+                    if info["up_to_date"]:
+                        con.flash(f"v{info['installed']} is already the latest version", "")
+                    else:
+                        con.flash(f"v{info['installed']} installed, v{info['latest']} "
+                                  f"available \u2014 press Y to update, any other key cancels", "", seconds=120)
+                        awaiting_confirm = True
+                except Exception as e:                            # noqa: BLE001
+                    con.flash("could not check: " + str(e), "err")
             elif ch == "c":
                 con.prev_lines = 0
                 sys.stdout.write("\033[2J\033[H")
