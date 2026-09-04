@@ -21,22 +21,26 @@ import os
 import sys
 import time
 
-from flask import Flask, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 
+import audioprep
 import console as term
 import localguard
 import portpick
 
-APP_VERSION = 1                        # one whole number, per modules/versioning.md
+APP_VERSION = 2                        # one whole number, per modules/versioning.md
 DEFAULT_PORT = 8420
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP_FILE = "maha_transcribe.html"
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = audioprep.MAX_UPLOAD_BYTES
 
 START_TIME = time.time()
 REQUEST_COUNT = 0
+OPTIMIZE_COUNT = 0
+BYTES_SAVED = 0
 
 # The port ACTUALLY bound, which is not always the preferred one. Set once at
 # startup and read from here everywhere downstream, so no part of the app can
@@ -70,11 +74,55 @@ def favicon_ico():
     return ("", 204)
 
 
+@app.route("/api/ffmpeg")
+def api_ffmpeg():
+    """So the page can ask, before offering a video file, whether the
+    server side of the pipeline is actually there to receive it."""
+    return jsonify({"available": audioprep.available()})
+
+
+@app.route("/api/optimize-audio", methods=["POST"])
+def api_optimize_audio():
+    """Take any file ffmpeg can decode, hand back small mono speech Opus.
+
+    The result never touches disk longer than the request: audioprep
+    writes to a temp directory and removes it before this returns, whether
+    the conversion succeeded or not.
+    """
+    global OPTIMIZE_COUNT, BYTES_SAVED
+
+    f = request.files.get("file")
+    if f is None:
+        return jsonify({"error": "no file arrived"}), 400
+    raw = f.read()
+    if not raw:
+        return jsonify({"error": "that file is empty"}), 400
+
+    try:
+        out_bytes, meta = audioprep.optimize(raw, f.filename or "")
+    except audioprep.AudioPrepError as e:
+        return jsonify({"error": str(e)}), 422
+
+    OPTIMIZE_COUNT += 1
+    BYTES_SAVED += max(0, meta["original_bytes"] - meta["optimized_bytes"])
+
+    resp = Response(out_bytes, mimetype="audio/ogg")
+    resp.headers["X-Original-Bytes"] = str(meta["original_bytes"])
+    resp.headers["X-Optimized-Bytes"] = str(meta["optimized_bytes"])
+    resp.headers["X-Convert-Seconds"] = str(meta["convert_seconds"])
+    if meta["duration_seconds"] is not None:
+        resp.headers["X-Duration-Seconds"] = str(meta["duration_seconds"])
+    return resp
+
+
 def console_snapshot():
     return {
         "version": APP_VERSION,
         "uptime": time.time() - START_TIME,
         "requests": REQUEST_COUNT,
+        "optimized": OPTIMIZE_COUNT,
+        "saved_mb": BYTES_SAVED / 1048576.0,
+        "ffmpeg": audioprep.available(),
     }
 
 

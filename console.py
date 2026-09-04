@@ -170,11 +170,17 @@ class Console:
         out.append("")
 
         s = self.snapshot() if self.snapshot else {}
+        ffmpeg_line = (p.w("ffmpeg ready", p.sand()) if s.get("ffmpeg")
+                      else p.w("ffmpeg NOT found, file picker cannot convert", p.red()))
         rows = [
             p.w(f"version {s.get('version', '?')}", p.sand())
             + p.w("   \u00b7   up " + hms(s.get("uptime")), p.slate()),
             p.w(f"{s.get('requests', 0)} request(s) answered", p.slate()),
+            ffmpeg_line,
         ]
+        if s.get("optimized"):
+            rows.append(p.w(f"{s['optimized']} file(s) optimized, "
+                            f"{s.get('saved_mb', 0):.1f} MB saved", p.slate()))
         out += self.panel("STATUS", rows, w)
         out.append("")
 

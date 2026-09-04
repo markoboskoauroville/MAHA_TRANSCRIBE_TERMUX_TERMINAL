@@ -208,11 +208,21 @@
   .kr-info { flex: 1; min-width: 0; }
   .kr-mask { font-size: 12px; word-break: break-all; }
   .kr-meta { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
-  .kr-badge { font-size: 9px; font-weight: 700; letter-spacing: 0.05em; padding: 2px 6px; border-radius: 999px; text-transform: uppercase; }
+  .kr-badge { font-size: 9px; font-weight: 700; letter-spacing: 0.05em; padding: 2px 6px; border-radius: 999px; text-transform: uppercase; display: inline-flex; align-items: center; gap: 3px; }
+  .kr-badge .kr-glyph { font-size: 10px; }
   .kr-badge.live { color: var(--green); background: rgba(34, 197, 94, 0.14); }
   .kr-badge.new { color: var(--text-dim); background: var(--surface); }
   .kr-badge.dead { color: var(--red); background: rgba(239, 68, 68, 0.14); }
+  .kr-badge.nocredit { color: var(--amber); background: rgba(245, 158, 11, 0.14); }
   .kr-badge.cool { color: var(--amber); background: rgba(245, 158, 11, 0.14); }
+  .kr-live { font-size: 10px; color: var(--text-dim); min-height: 14px; margin: 2px 0 4px; }
+  .kr-live .kr-glyph.testing { animation: krSpin 1.2s steps(8) infinite; display: inline-block; }
+  .kr-live .kr-glyph.live { color: var(--green); }
+  .kr-live .kr-glyph.dead { color: var(--red); }
+  .kr-live .kr-glyph.nocredit, .kr-live .kr-glyph.cool { color: var(--amber); }
+  .kr-live .kr-glyph.unclear { color: var(--text-dim); }
+  @keyframes krSpin { from { opacity: 1; } to { opacity: 0.3; } }
+  .kr-verbatim { color: var(--green); }
   .kr-row-actions { display: flex; gap: 4px; flex: 0 0 auto; }
   .kr-mini-btn { background: var(--surface); border: 1px solid var(--border); color: var(--text-dim); font-family: var(--mono); font-size: 10px; padding: 6px 8px; border-radius: 999px; cursor: pointer; }
   .kr-mini-btn:hover { border-color: var(--amber); color: var(--amber); }
@@ -371,7 +381,8 @@
     <div class="about">
       assembly models: <b>universal-3-pro, universal-2</b><br>
       reshape/grammar: <b>claude or gemini</b><br>
-      version: <b id="appVersion">v27 (a)</b>
+      file picker: <b>any format ffmpeg can read, optimized before upload</b><br>
+      version: <b id="appVersion">v28 (a)</b>
     </div>
   </div>
 </div>
@@ -397,7 +408,8 @@
     }
     function newRing() { return { keys: [], active: 0 }; }
 
-    // first usable key at or after start, wrapping; a rested "cool" key revives itself once its time is up
+    // first usable key at or after start, wrapping; a rested "cool" key revives itself once its time is up.
+    // "nocredit" never self-revives, same as "dead" -- an empty account does not top itself up.
     function pick(ring, start) {
       const keys = ring.keys || []; const n = keys.length;
       if (!n) return null;
@@ -405,7 +417,7 @@
       for (let j = 0; j < n; j++) {
         const i = (start + j) % n;
         const k = keys[i];
-        if (k.state === 'dead') continue;
+        if (k.state === 'dead' || k.state === 'nocredit') continue;
         if (k.state === 'cool') {
           if ((k.coolUntil || 0) > now) continue;
           k.state = 'new'; k.lastError = '';
@@ -414,15 +426,16 @@
       }
       return null;
     }
-    function usable(ring) { return (ring.keys || []).some(k => k.state !== 'dead'); }
+    function usable(ring) { return (ring.keys || []).some(k => k.state !== 'dead' && k.state !== 'nocredit'); }
     function counts(ring) {
-      const now = Date.now() / 1000; let live = 0, dead = 0, cool = 0;
+      const now = Date.now() / 1000; let live = 0, dead = 0, cool = 0, nocredit = 0;
       for (const k of (ring.keys || [])) {
         if (k.state === 'dead') dead++;
+        else if (k.state === 'nocredit') nocredit++;
         else if (k.state === 'cool' && (k.coolUntil || 0) > now) cool++;
         else live++;
       }
-      return { total: (ring.keys || []).length, live, dead, cool };
+      return { total: (ring.keys || []).length, live, dead, cool, nocredit };
     }
 
     const URL_RE = /https?:\/\/\S+/g;
@@ -472,6 +485,7 @@
     }
 
     function markDead(ring, idx, err) { const k = ring.keys[idx]; k.state = 'dead'; k.lastError = err || ''; }
+    function markNoCredit(ring, idx, err) { const k = ring.keys[idx]; k.state = 'nocredit'; k.lastError = err || ''; }
     function markCool(ring, idx, err, seconds) {
       const k = ring.keys[idx]; k.state = 'cool'; k.lastError = err || '';
       k.coolUntil = Date.now() / 1000 + (seconds != null ? seconds : 120);
@@ -480,7 +494,7 @@
     function reviveAll(ring) {
       let n = 0;
       for (const k of (ring.keys || [])) {
-        if (k.state === 'dead' || k.state === 'cool') { k.state = 'new'; k.lastError = ''; k.coolUntil = 0; n++; }
+        if (k.state === 'dead' || k.state === 'nocredit' || k.state === 'cool') { k.state = 'new'; k.lastError = ''; k.coolUntil = 0; n++; }
       }
       return n;
     }
@@ -491,7 +505,7 @@
     }
 
     // walk the ring until a key works. attempt(keyStr) resolves to
-    // {result, err, kind, wait} where kind is 'ok' | 'dead' | 'cool' | 'soft' | 'canceled'.
+    // {result, err, kind, wait} where kind is 'ok' | 'dead' | 'nocredit' | 'cool' | 'soft' | 'canceled'.
     // a 'soft' failure is nobody's fault, so it stops immediately instead of burning every key.
     async function rotate(ring, attempt) {
       const keys = ring.keys || []; const n = keys.length;
@@ -511,6 +525,7 @@
         }
         last = got.err || 'unknown error';
         if (got.kind === 'dead') markDead(ring, i, got.err);
+        else if (got.kind === 'nocredit') markNoCredit(ring, i, got.err);
         else if (got.kind === 'cool') markCool(ring, i, got.err, got.wait);
         else return { result: null, err: got.err };  // soft: not the key's fault, stop here
         idx = (i + 1) % n;
@@ -518,7 +533,7 @@
       return { result: null, err: 'all ' + n + ' key(s) unavailable. last: ' + last };
     }
 
-    return { fingerprint, mask, newRing, pick, usable, counts, importKeys, markDead, markCool, markOk, reviveAll, reviveOne, deleteOne, rotate };
+    return { fingerprint, mask, newRing, pick, usable, counts, importKeys, markDead, markNoCredit, markCool, markOk, reviveAll, reviveOne, deleteOne, rotate };
   })();
 
   // ---- one shared classifier for every provider, the table from quota-and-fallback.md §3 ----
@@ -536,13 +551,18 @@
     }
     const hasRetryHint = wait != null || /retrydelay|retry-after|try again in/.test(lower);
     const creditWords = /zero_credits|e0300|credit balance|insufficient|quota exceeded|out of credits|payment required|billing|depleted|prepayment/;
+    // 401/403 is REJECTED: the key itself is bad, revoked, or invalid.
+    // credit words under 400/429 is NO CREDIT: the key is real and the account
+    // is alive, it simply cannot afford the work right now — a different fact
+    // with a different fix (top up), so it gets its own state rather than
+    // being buried alongside a genuinely dead key. See modules/keyring.md §2d.
     if (status === 401 || status === 403) return { kind: 'dead', err: 'HTTP ' + status + (bodyText ? ': ' + bodyText.slice(0, 160) : '') };
     if (status === 429) {
-      if (!hasRetryHint && creditWords.test(lower)) return { kind: 'dead', err: 'out of credit' };
+      if (!hasRetryHint && creditWords.test(lower)) return { kind: 'nocredit', err: 'out of credit' };
       return { kind: 'cool', err: 'rate limited', wait: wait != null ? Math.min(3600, Math.max(1, wait)) : 60 };
     }
     if (status === 400) {
-      if (creditWords.test(lower)) return { kind: 'dead', err: 'out of credit' };
+      if (creditWords.test(lower)) return { kind: 'nocredit', err: 'out of credit' };
       return { kind: 'soft', err: 'bad request: ' + (bodyText || '').slice(0, 160) };
     }
     if (status === 404) return { kind: 'soft', err: 'wrong endpoint (404)' };
@@ -714,22 +734,33 @@
   }
   renderAaiModels();
 
-  // ---- API key ring panels: masked list, active radio, test, delete, revive, import ----
+  // ---- API key ring panels: masked list, active radio, test/test-all,
+  // delete, revive, import. States and glyphs follow Key_Tester's model
+  // (github.com/markoboskoauroville/Key_Tester, HANDOFF.md "five states"):
+  // untested, live/works, no credit, rejected, resting/throttled, and a
+  // transient "unclear" for a soft result that never changes the ring.
+  const KR_GLYPH = { untested: '\u25CB', testing: '\u2026', live: '\u25CF', nocredit: '$', dead: '\u2715', cool: '\u25D0', unclear: '?' };
+  const KR_WORD = { untested: 'untested', testing: 'testing', live: 'live', nocredit: 'no credit', dead: 'rejected', cool: 'resting', unclear: 'unclear' };
   function krStateLabel(k) {
     if (k.state === 'dead') return 'dead';
+    if (k.state === 'nocredit') return 'nocredit';
     if (k.state === 'cool' && (k.coolUntil || 0) > Date.now() / 1000) return 'cool';
     return k.calls > 0 ? 'live' : 'new';
   }
+  const KR_BADGE_WORD = { dead: KR_WORD.dead, nocredit: KR_WORD.nocredit, cool: KR_WORD.cool, live: KR_WORD.live, new: KR_WORD.untested };
+  const KR_BADGE_GLYPH = { dead: KR_GLYPH.dead, nocredit: KR_GLYPH.nocredit, cool: KR_GLYPH.cool, live: KR_GLYPH.live, new: KR_GLYPH.untested };
   function krRowMeta(k, label) {
     const bits = [];
     if (label === 'cool') { const secs = Math.max(0, Math.round((k.coolUntil || 0) - Date.now() / 1000)); bits.push('resting ' + secs + 's'); }
-    if (k.lastError) bits.push(k.lastError.slice(0, 60));
+    if (k.lastError) bits.push('<span class="kr-verbatim">' + krEsc(k.lastError.slice(0, 90)) + '</span>');
     if (k.calls) bits.push(k.calls + ' call' + (k.calls === 1 ? '' : 's'));
     return bits.join('  \u00B7  ');
   }
+  function krEsc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
   async function krProbe(provider, key) {
     // the smallest real, billable thing each provider sells, per keyring.md §2h.
-    // never a plain list call: a spent account can still return 200 from a list.
+    // never a plain list call: a spent account can still return 200 from a list
+    // (Key_Tester HANDOFF.md's "two questions" — valid, and separately, funded).
     if (provider === 'claude') {
       const r = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
@@ -773,20 +804,54 @@
     for (let i = 0; i < n; i++) dv.setInt16(44 + i * 2, Math.trunc(8000 * Math.sin(2 * Math.PI * 440 * i / 16000)), true);
     return new Blob([buf], { type: 'audio/wav' });
   }
-  async function krTestKey(provider, idx) {
+  function krLiveLine(provider, html) {
+    const el = document.getElementById('kr-live-' + provider);
+    if (el) el.innerHTML = html || '';
+  }
+  // one key, one probe. Returns the badge state actually reached, so a bulk
+  // "test all" can report a running tally the way Key_Tester's live line does.
+  async function krTestOne(provider, idx) {
     const ring = loadRing(provider);
-    const key = ring.keys[idx]; if (!key) return;
-    renderKeyringPanels('testing ' + KR.mask(key.key) + '...');
+    const key = ring.keys[idx]; if (!key) return null;
+    const masked = KR.mask(key.key);
+    krLiveLine(provider, '<span class="kr-glyph testing">' + KR_GLYPH.testing + '</span> testing \u00b7 ' + krEsc(masked));
+    let reached = 'unclear';
     try {
       const res = await krProbe(provider, key.key);
-      if (res.ok) { KR.markOk(ring, idx); saveRing(provider, ring); renderKeyringPanels(); return; }
-      const bodyText = await res.text().catch(() => '');
-      const v = krClassify(res.status, bodyText, res.headers);
-      if (v.kind === 'dead') KR.markDead(ring, idx, v.err);
-      else if (v.kind === 'cool') KR.markCool(ring, idx, v.err, v.wait);
-      else key.lastError = v.err;
-      saveRing(provider, ring);
-    } catch (e) { key.lastError = 'network error: ' + e.message; saveRing(provider, ring); }
+      if (res.ok) {
+        KR.markOk(ring, idx); reached = 'live';
+      } else {
+        const bodyText = await res.text().catch(() => '');
+        const v = krClassify(res.status, bodyText, res.headers);
+        if (v.kind === 'dead') { KR.markDead(ring, idx, v.err); reached = 'dead'; }
+        else if (v.kind === 'nocredit') { KR.markNoCredit(ring, idx, v.err); reached = 'nocredit'; }
+        else if (v.kind === 'cool') { KR.markCool(ring, idx, v.err, v.wait); reached = 'cool'; }
+        else { key.lastError = v.err; reached = 'unclear'; }   // soft: never changes the ring, per Key_Tester's own rule
+      }
+    } catch (e) { key.lastError = 'no connection: ' + e.message; reached = 'unclear'; }
+    saveRing(provider, ring);
+    const glyph = KR_GLYPH[reached] || KR_GLYPH.unclear;
+    const word = KR_WORD[reached] || KR_WORD.unclear;
+    krLiveLine(provider, '<span class="kr-glyph ' + reached + '">' + glyph + '</span> ' + krEsc(masked) + ' \u00b7 ' + word);
+    return reached;
+  }
+  async function krTestKey(provider, idx) {
+    renderKeyringPanels();
+    await krTestOne(provider, idx);
+    renderKeyringPanels();
+  }
+  async function krTestAll(provider) {
+    const ring = loadRing(provider);
+    const n = ring.keys.length;
+    if (!n) return;
+    const btn = document.querySelector('[data-act=test-all][data-provider=' + provider + ']');
+    if (btn) btn.disabled = true;
+    for (let i = 0; i < n; i++) {
+      await krTestOne(provider, i);
+      krLiveLine(provider, (document.getElementById('kr-live-' + provider) || {}).innerHTML + '  \u00b7  ' + (i + 1) + '/' + n);
+    }
+    krLiveLine(provider, '\u2713 done \u00b7 ' + n + '/' + n);
+    if (btn) btn.disabled = false;
     renderKeyringPanels();
   }
   function krImport(provider, raw) {
@@ -803,23 +868,35 @@
       const cfg = KR_PROVIDERS[provider];
       const ring = loadRing(provider);
       const c = KR.counts(ring);
+      const untested = ring.keys.filter(k => krStateLabel(k) === 'new').length;
+      // the exact Key_Tester summary shape: "<file> · N keys · X work · C no credit · Y rejected · Z untested"
+      const summary = c.total + ' key' + (c.total === 1 ? '' : 's') +
+        '  \u00B7  ' + c.live + ' live' +
+        '  \u00B7  ' + c.nocredit + ' no credit' +
+        '  \u00B7  ' + c.dead + ' rejected' +
+        '  \u00B7  ' + untested + ' untested';
       const rows = ring.keys.length === 0
         ? '<div class="kr-empty">no keys yet, import below</div>'
         : ring.keys.map((k, i) => {
             const label = krStateLabel(k);
             const meta = krRowMeta(k, label);
+            const glyph = KR_BADGE_GLYPH[label], word = KR_BADGE_WORD[label];
             return '<div class="kr-row">' +
               '<input type="radio" name="kr-active-' + provider + '" ' + (i === (ring.active || 0) ? 'checked' : '') + ' data-provider="' + provider + '" data-idx="' + i + '" class="kr-active-radio">' +
-              '<div class="kr-info"><div class="kr-mask">' + KR.mask(k.key) + '<span class="kr-badge ' + label + '"> ' + label + '</span></div>' +
+              '<div class="kr-info"><div class="kr-mask">' + KR.mask(k.key) + '<span class="kr-badge ' + label + '"><span class="kr-glyph">' + glyph + '</span> ' + word + '</span></div>' +
               (meta ? '<div class="kr-meta">' + meta + '</div>' : '') + '</div>' +
               '<div class="kr-row-actions">' +
               '<button type="button" class="kr-mini-btn" data-act="test" data-provider="' + provider + '" data-idx="' + i + '">test</button>' +
-              (label === 'dead' || label === 'cool' ? '<button type="button" class="kr-mini-btn" data-act="revive" data-provider="' + provider + '" data-idx="' + i + '">revive</button>' : '') +
+              (label === 'dead' || label === 'nocredit' || label === 'cool' ? '<button type="button" class="kr-mini-btn" data-act="revive" data-provider="' + provider + '" data-idx="' + i + '">revive</button>' : '') +
               '<button type="button" class="kr-mini-btn danger" data-act="delete" data-provider="' + provider + '" data-idx="' + i + '">delete</button>' +
               '</div></div>';
           }).join('');
       return '<div class="kr-panel">' +
-        '<div class="kr-head"><span class="kr-title">' + cfg.label + '</span><span class="kr-count">' + c.live + ' live, ' + c.cool + ' cool, ' + c.dead + ' dead</span></div>' +
+        '<div class="kr-head"><span class="kr-title">' + cfg.label + '</span>' +
+        (ring.keys.length > 1 ? '<button type="button" class="kr-mini-btn" data-act="test-all" data-provider="' + provider + '">test all</button>' : '') +
+        '</div>' +
+        '<div class="kr-count">' + summary + '</div>' +
+        '<div class="kr-live" id="kr-live-' + provider + '"></div>' +
         rows +
         '<div class="kr-import">' +
         '<textarea id="kr-paste-' + provider + '" placeholder="paste keys here, or browse a file below"></textarea>' +
@@ -833,6 +910,7 @@
       const ring = loadRing(r.dataset.provider); ring.active = parseInt(r.dataset.idx, 10); saveRing(r.dataset.provider, ring); renderKeyringPanels();
     }));
     Array.from(wrap.querySelectorAll('[data-act=test]')).forEach(b => b.addEventListener('click', () => krTestKey(b.dataset.provider, parseInt(b.dataset.idx, 10))));
+    Array.from(wrap.querySelectorAll('[data-act=test-all]')).forEach(b => b.addEventListener('click', () => krTestAll(b.dataset.provider)));
     Array.from(wrap.querySelectorAll('[data-act=revive]')).forEach(b => b.addEventListener('click', () => {
       const ring = loadRing(b.dataset.provider); KR.reviveOne(ring, parseInt(b.dataset.idx, 10)); saveRing(b.dataset.provider, ring); renderKeyringPanels();
     }));
@@ -902,15 +980,76 @@
     applyLangUI();
   }));
 
+  // ---- ffmpeg optimization: convert whatever was picked into small mono
+  // speech-ready Opus before it ever reaches the AssemblyAI ring. Runs the
+  // moment a file is chosen, not on the TRANSCRIBE press, so there is
+  // nothing to wait for once the button is actually pressed.
+  let ffmpegAvailable = null; // null = not checked yet
+  let pickedFile = null;      // the raw File the person chose
+  let optimizedBlob = null;   // the ffmpeg result, or the raw file if ffmpeg is unavailable/failed
+  let optimizing = false;
+
+  async function checkFfmpeg() {
+    if (ffmpegAvailable !== null) return ffmpegAvailable;
+    try {
+      const r = await fetch('/api/ffmpeg', { headers: { 'X-Maha-Local': '1' } });
+      const d = await r.json();
+      ffmpegAvailable = !!d.available;
+    } catch (e) { ffmpegAvailable = false; }
+    return ffmpegAvailable;
+  }
+  function fmtMBshort(n) { return (n / 1048576).toFixed(1) + ' MB'; }
+
+  async function optimizePickedFile() {
+    const file = pickedFile;
+    if (!file) return;
+    optimizing = true;
+    optimizedBlob = file; // safe default: the raw file, used if ffmpeg is absent or fails
+    updateTranscribeState();
+
+    const hasFfmpeg = await checkFfmpeg();
+    if (!hasFfmpeg) {
+      setStatus('ffmpeg not found on the server, sending the file as-is', 'err');
+      optimizing = false; updateTranscribeState();
+      return;
+    }
+
+    setStatus('optimizing audio with ffmpeg\u2026');
+    try {
+      const fd = new FormData();
+      fd.append('file', file, file.name);
+      const r = await fetch('/api/optimize-audio', {
+        method: 'POST', headers: { 'X-Maha-Local': '1' }, body: fd
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        setStatus('ffmpeg: ' + (d.error || ('HTTP ' + r.status)) + '  \u00B7  sending the original file instead', 'err');
+        optimizing = false; updateTranscribeState();
+        return;
+      }
+      const blob = await r.blob();
+      const before = parseInt(r.headers.get('X-Original-Bytes') || file.size, 10);
+      const after = parseInt(r.headers.get('X-Optimized-Bytes') || blob.size, 10);
+      optimizedBlob = new File([blob], (file.name || 'audio').replace(/\.[^.]+$/, '') + '.ogg', { type: 'audio/ogg' });
+      const pct = before > 0 ? Math.round(100 * (1 - after / before)) : 0;
+      setStatus('optimized  \u00B7  ' + fmtMBshort(before) + ' \u2192 ' + fmtMBshort(after) + (pct > 0 ? '  (\u2212' + pct + '%)' : ''), 'ok');
+    } catch (e) {
+      setStatus('ffmpeg request failed: ' + e.message + '  \u00B7  sending the original file instead', 'err');
+    }
+    optimizing = false; updateTranscribeState();
+  }
+
   audioInput.addEventListener('change', () => {
     const f = audioInput.files[0];
-    if (f) { dropLabel.textContent = f.name; drop.classList.add('has-file'); }
+    pickedFile = f || null;
+    optimizedBlob = null;
+    if (f) { dropLabel.textContent = f.name; drop.classList.add('has-file'); optimizePickedFile(); }
     else { dropLabel.textContent = 'CHOOSE FILE'; drop.classList.remove('has-file'); }
     updateTranscribeState();
   });
 
   function updateTranscribeState() {
-    transcribeBtn.disabled = !(audioInput.files[0] && serviceReady());
+    transcribeBtn.disabled = !(pickedFile && !optimizing && serviceReady());
   }
   updateTranscribeState();
   if (!ringHasKeys('assembly')) {
@@ -1092,7 +1231,7 @@
   }
 
   transcribeBtn.addEventListener('click', () => {
-    const file = audioInput.files[0];
+    const file = optimizedBlob || pickedFile;
     if (!file) return;
     transcribeBtn.disabled = true;
     runTranscriptionSession([file], setStatus, (text) => {
