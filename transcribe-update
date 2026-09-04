@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# The `transcribe-update` command: pulls the latest version of the app.
+# The `transcribe-update` command: pulls the latest version and refreshes
+# its dependencies, then exits.
 set -euo pipefail
 
 # resolve to the real repo directory even when this file is a symlink in PATH
@@ -23,7 +24,13 @@ LOCAL="$(git rev-parse @)"
 REMOTE="$(git rev-parse @{u})"
 if [[ "$LOCAL" == "$REMOTE" ]]; then
   echo "already up to date"
-else
-  git pull --ff-only
-  echo "updated"
+  exit 0
 fi
+git pull --ff-only
+
+PY="$REPO_DIR/.venv/bin/pip"
+if [[ -x "$PY" ]]; then
+  echo "refreshing dependencies..."
+  "$PY" install --quiet -r "$REPO_DIR/requirements.txt"
+fi
+echo "updated"

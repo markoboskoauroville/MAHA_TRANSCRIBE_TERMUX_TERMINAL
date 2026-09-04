@@ -12,5 +12,11 @@ while [ -L "$SOURCE" ]; do
 done
 REPO_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 
+PY="$REPO_DIR/.venv/bin/python"
+if [[ ! -x "$PY" ]]; then
+  echo "the virtual environment is missing, reinstall with the install script"
+  exit 1
+fi
+
 PORT="${1:-8420}"
-exec python3 "$REPO_DIR/server.py" "$PORT"
+exec "$PY" "$REPO_DIR/app.py" "$PORT"
