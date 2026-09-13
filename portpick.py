@@ -1,6 +1,11 @@
 """
 portpick.py  --  the app never fails to start because a port is taken.
 
+THE SOURCE. KEYRING_TERMUX, SHOP_FINDER and COCKPIT_TERMUX carry copies of this file with only
+the port, the marker and the app name changed; a fix is made HERE and pulled into them. (The
+TIME_WAIT fix of 13.9.2026 landed in the keyring's copy first and was pulled back here the same
+day: a source that is behind its copies is the failure README.md rule 1 names.)
+
 A transcriber that refuses to open because some other program happens to be
 on 8420 is a transcriber that is not there when it is wanted. Worse: the
 thing on 8420 is very often THIS APP, still running from before -- so the
@@ -26,6 +31,8 @@ per modules/quota-and-fallback.md's own house rule: read the file that
 already solves a problem before writing a new one.
 """
 
+import atexit
+import os
 import socket
 
 MAX_TRIES = 16          # 8420 through 8435, then the OS decides
@@ -51,9 +58,26 @@ def is_free(host, port, timeout=0.4):
         s.bind((host, port))
         return True
     except OSError:
-        return False
+        pass
     finally:
         s.close()
+    # The bind failed. If nothing LISTENS there, the port is only in TIME_WAIT from the
+    # connections the last copy of this app served (an HTTP server closes first, so its own
+    # port wears TIME_WAIT for a minute), and the real server binds it with SO_REUSEADDR
+    # without trouble. Found 13.9.2026: the u key's restart landed on the NEXT port every
+    # time, and the page that was open pointed at a dead one. Only a port that answers a
+    # connection is taken.
+    c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        c.settimeout(timeout)
+        c.connect((host, port))
+        return False
+    except ConnectionRefusedError:
+        return True
+    except OSError:
+        return False
+    finally:
+        c.close()
 
 
 def whats_there(port, timeout=1.0):
@@ -96,7 +120,7 @@ def pick(host, preferred, tries=MAX_TRIES):
     quietly opens somewhere other than where he expects is its own
     confusion.
     """
-    preferred = int(preferred or 8420)
+    preferred = int(preferred or 8842)
 
     if is_free(host, preferred):
         return preferred, None
@@ -131,3 +155,87 @@ def pick(host, preferred, tries=MAX_TRIES):
         s.close()
     return chosen, (f"{why}, and {preferred}-{preferred + tries - 1} were "
                     f"all taken, so this one is on {chosen} instead.")
+
+
+# ---------------------------------------------------------------------------
+#  The live registry (modules/ports.md §3), written 13.9.2026.
+#
+#  A launcher (mamc) that wants to open an app's page cannot read the ports
+#  table in the manifest; it needs the port the app bound TODAY. So every app
+#  that picks a port writes one line, and removes it on the way out:
+#
+#      ~/.mantra/ports/<command>     the number, nothing else, 0600
+#
+#  Written right after pick(), removed at exit. Stale when the app was
+#  killed: the launcher checks that the port answers before trusting the
+#  file, so a stale line costs one refused connection and nothing else.
+#  Nothing in here raises: a registry that cannot be written is not worth
+#  failing a start over.
+# ---------------------------------------------------------------------------
+
+REGISTRY = os.path.join(os.path.expanduser("~"), ".mantra", "ports")
+
+
+def _entry(command):
+    command = str(command or "").strip()
+    if not command or "/" in command or command in (".", ".."):
+        return None
+    return os.path.join(REGISTRY, command)
+
+
+def announce(command, port):
+    """Write ~/.mantra/ports/<command> = port, and remove it at exit.
+
+    Returns the path written, or None when nothing was (no command, a port
+    out of range, a registry that cannot be written). Written beside its
+    name and renamed over it, so a reader never sees a half-written number.
+    """
+    path = _entry(command)
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return None
+    if path is None or not (1 <= port <= 65535):
+        return None
+    try:
+        os.makedirs(REGISTRY, mode=0o700, exist_ok=True)
+        tmp = path + ".new"
+        with open(tmp, "w") as f:
+            f.write("%d\n" % port)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError:
+        return None
+    atexit.register(forget, command, port)
+    return path
+
+
+def forget(command, port=None):
+    """Remove the line, but only if it still says OUR port: a second copy of
+    the app started after us owns the file now, and its line must stay."""
+    path = _entry(command)
+    if path is None:
+        return False
+    try:
+        if port is not None:
+            with open(path) as f:
+                if f.read().strip() != str(int(port)):
+                    return False
+        os.remove(path)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def registered(command):
+    """The launcher's side: the number in ~/.mantra/ports/<command>, or None.
+    Whether that port ANSWERS is the caller's question, not this one's."""
+    path = _entry(command)
+    if path is None:
+        return None
+    try:
+        with open(path) as f:
+            port = int(f.read(16).strip())
+    except (OSError, ValueError):
+        return None
+    return port if 1 <= port <= 65535 else None

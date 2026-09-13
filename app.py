@@ -143,6 +143,7 @@ if __name__ == "__main__":
     # NEVER refuse to start over a busy port. Very often the thing holding it
     # is another copy of this app, still running from before.
     LIVE_PORT, port_note = portpick.pick("127.0.0.1", requested)
+    portpick.announce("transcribe", LIVE_PORT)      # ~/.mantra/ports, for the launcher (ports.md §3)
 
     action = term.run(app, "127.0.0.1", LIVE_PORT, snapshot=console_snapshot,
                       note=port_note, on_check_update=selfupdate.check_remote,
