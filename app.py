@@ -19,6 +19,7 @@ version of that pattern, not a rewrite of it.
 
 import os
 import sys
+import threading
 import time
 
 from flask import Flask, Response, jsonify, request, send_from_directory
@@ -117,6 +118,36 @@ def api_optimize_audio():
     return resp
 
 
+@app.route("/api/version")
+def api_version():
+    """The installed version, and when this server started -- the page
+    reloads itself once boot changes, which is how it knows the restart
+    after an update has finished."""
+    return jsonify({"version": APP_VERSION, "boot": START_TIME})
+
+
+@app.route("/api/update/check")
+def api_update_check():
+    """The settings' UPDATE THE APP button, first press: the same check as
+    the console's U key, read off GitHub without changing anything."""
+    try:
+        return jsonify(selfupdate.check_remote())
+    except selfupdate.UpdateError as e:
+        return jsonify({"error": str(e)}), 502
+
+
+@app.route("/api/update", methods=["POST"])
+def api_update():
+    """Second press: pull, refresh dependencies, then restart a moment
+    later, after this answer has reached the page."""
+    try:
+        msg = selfupdate.perform_update()
+    except selfupdate.UpdateError as e:
+        return jsonify({"error": str(e)}), 502
+    threading.Timer(0.8, term.request_restart).start()
+    return jsonify({"message": msg})
+
+
 def console_snapshot():
     return {
         "version": APP_VERSION,
@@ -149,4 +180,10 @@ if __name__ == "__main__":
                       note=port_note, on_check_update=selfupdate.check_remote,
                       on_perform_update=selfupdate.perform_update)
     if action == "restart":
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        # werkzeug leaves its listening socket inheritable, so without this it
+        # rides through execv: the old port stays open with nobody answering
+        # (a request there hangs) and portpick moves the new server up one.
+        # Close everything but stdin/out/err, then take the same port again,
+        # so the open page finds its server where it left it.
+        os.closerange(3, 65536)
+        os.execv(sys.executable, [sys.executable, os.path.abspath(__file__), str(LIVE_PORT)])

@@ -147,6 +147,16 @@ def _print_keys(colour):
     say(w("\u0950" + "\u2500" * max(cols - 3, 0), AMBER, colour))
 
 
+# Set by request_restart() when the page's UPDATE THE APP button has pulled
+# a new version; the console loop sees it within half a second and returns
+# "restart", restoring the terminal first, exactly as the R key does.
+_RESTART = threading.Event()
+
+
+def request_restart():
+    _RESTART.set()
+
+
 def run(app, host, port, snapshot=None, note=None, on_check_update=None, on_perform_update=None):
     """Serve, printing plain lines rather than drawing a box.
 
@@ -163,8 +173,17 @@ def run(app, host, port, snapshot=None, note=None, on_check_update=None, on_perf
 
     if not is_interactive():
         say(f"Maha Transcribe \u2014 http://127.0.0.1:{port}")
-        app.run(host=host, port=port, threaded=True, debug=False, use_reloader=False)
-        return "quit"
+        threading.Thread(
+            target=lambda: app.run(host=host, port=port, threaded=True,
+                                   debug=False, use_reloader=False),
+            daemon=True).start()
+        try:
+            while not _RESTART.wait(0.5):
+                pass
+        except KeyboardInterrupt:
+            return "quit"
+        say("  updated from the page, restarting\u2026")
+        return "restart"
 
     _print_keys(colour)
 
@@ -226,6 +245,10 @@ def run(app, host, port, snapshot=None, note=None, on_check_update=None, on_perf
     try:
         tty.setcbreak(fd)
         while True:
+            if _RESTART.is_set():
+                say("  " + w("updated from the page, restarting\u2026", AMBER, colour))
+                action = "restart"
+                break
             r, _, _ = select.select([fd], [], [], 0.5)
             if not r:
                 continue

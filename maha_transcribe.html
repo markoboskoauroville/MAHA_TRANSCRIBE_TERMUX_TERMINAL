@@ -187,6 +187,13 @@
   .key-picker.attention { border-color: var(--red); color: var(--red); }
   .key-picker input { display: none; }
   .key-list { font-size: 11px; color: var(--text-dim); line-height: 1.6; margin-top: 6px; }
+  .upd-box { background: var(--surface-2); border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; margin-bottom: 14px; }
+  .upd-row { display: flex; align-items: center; gap: 12px; }
+  .upd-ver { font-family: var(--mono); font-size: 18px; font-weight: 700; color: var(--text); min-width: 52px; }
+  .upd-btn { padding: 12px 4px; }
+  .upd-status { font-size: 11px; color: var(--text-dim); margin-top: 8px; line-height: 1.5; }
+  .upd-status.ok { color: #6fcf97; } .upd-status.new { color: #f2c94c; } .upd-status.err { color: #eb5757; }
+  .upd-cmd { font-size: 10px; color: var(--text-dim); margin-top: 6px; font-family: var(--mono); }
   .about { font-size: 11px; color: var(--text-dim); margin-top: 8px; line-height: 1.7; }
   .about b { color: var(--cyan); }
   .radio-group { margin-bottom: 6px; }
@@ -362,6 +369,14 @@
   <!-- SETTINGS -->
   <div class="tab" id="settingsPanel">
     <div class="rec-settings-label">SETTINGS</div>
+    <div class="upd-box">
+      <div class="upd-row">
+        <span class="upd-ver" id="updVersion">v…</span>
+        <button type="button" class="lang-btn upd-btn" id="updBtn">UPDATE THE APP</button>
+      </div>
+      <div class="upd-status" id="updStatus">checks GitHub, then pulls and restarts the server</div>
+      <div class="upd-cmd">or in the terminal: <b>transcribe-update</b> &nbsp;·&nbsp; or <b>U</b> in the running console</div>
+    </div>
     <button class="tab-btn" data-tab="arh">ARCHIVE</button>
     <label class="field-label">reshape and grammar model</label>
     <div class="row" id="corrProviderList" style="flex-wrap:wrap;"></div>
@@ -379,10 +394,10 @@
     </div>
     <div id="keyringPanels"></div>
     <div class="about">
-      assembly models: <b>universal-3-pro, universal-2</b><br>
+      assembly models: <b id="aaiModelsAbout">…</b><br>
       reshape/grammar: <b>claude or gemini</b><br>
       file picker: <b>any format ffmpeg can read, optimized before upload</b><br>
-      version: <b id="appVersion">v28 (a)</b>
+      version: <b id="appVersion">v29</b>
     </div>
   </div>
 </div>
@@ -598,10 +613,81 @@
   let txCancelGen = 0;
   function txCanceled(gen) { return gen !== txCancelGen; }
   function txAbortError() { const e = new Error('canceled'); e.__canceled = true; return e; }
-  const AAI_MODELS = ['universal-3-pro', 'universal-2'];
+  // ---- AssemblyAI models, learned from AssemblyAI itself, never trusted from this file ----
+  // AssemblyAI renames a model by bumping the version inside its name (universal-3-pro became
+  // universal-3-5-pro on 5.10.2026), and retires old names with a 400. So:
+  //   * a choice is stored as a FAMILY, the name with its version taken out (universal-#-pro),
+  //     and always resolves to the newest member of that family that AssemblyAI lists now;
+  //   * "auto" sends no model at all, and AssemblyAI uses its own current best (the default);
+  //   * the list of valid names is asked of the API: an unknown name is refused, free and with
+  //     no job made, with the full list of valid ones (aaiDiscoverModels), once a day and again
+  //     whenever a submit is refused over a model, after which the submit is retried once.
+  const AAI_SEED_MODELS = ['universal-3-5-pro', 'universal-3-pro', 'universal-2']; // first run only, until AssemblyAI answers
+  const AAI_AUTO = 'auto';
+  const AAI_KNOWN_KEY = 'whisper_aai_known';
+  const AAI_DISCOVER_EVERY_MS = 24 * 3600 * 1000;
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-  function getAaiModel() { const m = localStorage.getItem('whisper_aai_model'); return AAI_MODELS.includes(m) ? m : AAI_MODELS[0]; }
+  function aaiFamily(m) { return String(m).replace(/(-\d+)+(?=-|$)/, '-#'); }
+  function aaiVersionOf(m) { const x = String(m).match(/(-\d+)+(?=-|$)/); return x ? x[0].split('-').filter(Boolean).map(Number) : []; }
+  function aaiNewer(a, b) { // >0 when a is the newer version
+    const va = aaiVersionOf(a), vb = aaiVersionOf(b);
+    for (let i = 0; i < Math.max(va.length, vb.length); i++) { const d = (va[i] || 0) - (vb[i] || 0); if (d) return d; }
+    return 0;
+  }
+  function aaiKnown() {
+    try { const j = JSON.parse(localStorage.getItem(AAI_KNOWN_KEY)); if (j && Array.isArray(j.models) && j.models.length) return j; } catch (e) {}
+    return { models: AAI_SEED_MODELS.slice(), checked: 0 };
+  }
+  // newest member of every family, the best family (highest version) first
+  function aaiNewestPerFamily() {
+    const best = {};
+    aaiKnown().models.forEach(m => { const f = aaiFamily(m); if (!best[f] || aaiNewer(m, best[f]) > 0) best[f] = m; });
+    return Object.values(best).sort((a, b) => aaiNewer(b, a));
+  }
+  // the quoted model names inside an AssemblyAI error, e.g. one of: "universal-3-pro", "universal-2"
+  function aaiParseModels(text) {
+    const out = [];
+    (String(text).match(/\\?"([a-z][a-z0-9]*(?:-[a-z0-9]+)+)\\?"/g) || []).forEach(q => {
+      const m = q.replace(/[\\"]/g, '');
+      if (!/^speech_/.test(m) && !out.includes(m)) out.push(m);
+    });
+    return out;
+  }
+  function aaiRemember(models) {
+    if (!models.length) return false;
+    localStorage.setItem(AAI_KNOWN_KEY, JSON.stringify({ models, checked: Date.now() }));
+    if (typeof renderAaiModels === 'function') renderAaiModels();
+    updateBottomBar();
+    return true;
+  }
+  async function aaiDiscoverModels(key) {
+    try {
+      const r = await fetch(AAI_BASE + '/v2/transcript', {
+        method: 'POST', headers: { 'authorization': key, 'content-type': 'application/json' },
+        body: JSON.stringify({ audio_url: 'https://example.invalid/model-list.wav', speech_models: ['?'] })
+      });
+      if (r.ok) return false; // AssemblyAI accepted a nonsense name: nothing to learn this way
+      return aaiRemember(aaiParseModels(await r.text()));
+    } catch (e) { return false; }
+  }
+  function aaiFirstUsableKey() { const ring = loadRing('assembly'); const i = KR.pick(ring, ring.active || 0); return i == null ? null : (ring.keys[i] || {}).key; }
+  function aaiDiscoverIfStale(force) {
+    if (!force && Date.now() - aaiKnown().checked < AAI_DISCOVER_EVERY_MS) return;
+    const key = aaiFirstUsableKey(); if (key) aaiDiscoverModels(key);
+  }
+  // the stored choice: 'auto' or a family; an exact name from an older version is turned into its family
+  function getAaiChoice() {
+    const v = localStorage.getItem('whisper_aai_model');
+    if (!v || v === AAI_AUTO) return AAI_AUTO;
+    return v.includes('#') ? v : aaiFamily(v);
+  }
+  // the exact name to send, or null for auto (and for a family AssemblyAI no longer lists)
+  function aaiResolve(choice) {
+    if (choice === AAI_AUTO) return null;
+    return aaiNewestPerFamily().find(m => aaiFamily(m) === choice) || null;
+  }
+  function getAaiModel() { return aaiResolve(getAaiChoice()) || AAI_AUTO; }
   function getQModel() { return localStorage.getItem('whisper_qmodel') || 'gemini-2.5-flash'; }
   function serviceReady() { return ringHasKeys('assembly'); }
 
@@ -722,10 +808,15 @@
   // ---- AssemblyAI transcription model selector (settings) ----
   const aaiModelList = document.getElementById('aaiModelList');
   function renderAaiModels() {
-    const cur = getAaiModel();
-    aaiModelList.innerHTML = AAI_MODELS.map(m =>
-      '<button type="button" class="lang-btn aai-model' + (m === cur ? ' active' : '') + '" data-model="' + m + '">' + m + '</button>'
+    const cur = getAaiChoice();
+    const opts = [[AAI_AUTO, 'auto (assemblyai\u2019s best)']].concat(aaiNewestPerFamily().map(m => [aaiFamily(m), m]));
+    const active = opts.some(o => o[0] === cur) ? cur : AAI_AUTO;
+    aaiModelList.innerHTML = opts.map(([v, label]) =>
+      '<button type="button" class="lang-btn aai-model' + (v === active ? ' active' : '') + '" data-model="' + v + '">' + label + '</button>'
     ).join('');
+    const k = aaiKnown();
+    const about = document.getElementById('aaiModelsAbout');
+    if (about) about.textContent = k.models.join(', ') + (k.checked ? '  (asked of assemblyai ' + new Date(k.checked).toLocaleDateString() + ')' : '  (not yet asked of assemblyai)');
     Array.from(aaiModelList.querySelectorAll('.aai-model')).forEach(b => b.addEventListener('click', () => {
       localStorage.setItem('whisper_aai_model', b.dataset.model);
       renderAaiModels();
@@ -733,6 +824,51 @@
     }));
   }
   renderAaiModels();
+  aaiDiscoverIfStale(false); // once a day, ask AssemblyAI which model names are valid now
+
+  // ---- UPDATE THE APP: the server checks GitHub (selfupdate.py, the console's U key),
+  // pulls, refreshes its dependencies and restarts; the page reloads once it is back ----
+  const updBtn = document.getElementById('updBtn');
+  const updStatus = document.getElementById('updStatus');
+  const updVersion = document.getElementById('updVersion');
+  let updOffer = null, updBusy = false;
+  function updSay(text, cls) { updStatus.textContent = text; updStatus.className = 'upd-status' + (cls ? ' ' + cls : ''); }
+  async function updApi(path, method) {
+    const r = await fetch(path, { method: method || 'GET', headers: { 'X-Maha-Local': '1' } });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    return j;
+  }
+  updApi('/api/version').then(j => { updVersion.textContent = 'v' + j.version; })
+    .catch(() => { updVersion.textContent = 'v?'; updSay('the update button needs the transcribe server (this page was opened as a file)', 'err'); });
+  updBtn.addEventListener('click', async () => {
+    if (updBusy) return;
+    updBusy = true; updBtn.disabled = true;
+    try {
+      if (!updOffer) {
+        updSay('checking GitHub…');
+        const info = await updApi('/api/update/check');
+        if (info.up_to_date) { updSay('v' + info.installed + ' is up to date, nothing new on GitHub', 'ok'); return; }
+        updOffer = info;
+        updSay('something new: v' + info.installed + ' → v' + info.latest +
+               (info.behind ? ' (' + info.behind + (info.behind === 1 ? ' change' : ' changes') + ')' : '') + '. press again to update', 'new');
+        updBtn.textContent = 'UPDATE NOW';
+        return;
+      }
+      const before = (await updApi('/api/version')).boot;
+      updSay('pulling from GitHub…', 'new');
+      const done = await updApi('/api/update', 'POST');
+      updSay((done.message || 'updated') + '  ·  restarting the server…', 'new');
+      for (let i = 0; i < 60; i++) {
+        await sleep(1000);
+        try { const v = await updApi('/api/version'); if (v.boot !== before) { location.reload(); return; } } catch (e) {}
+      }
+      updSay('updated, but the server did not come back: run transcribe again', 'err');
+    } catch (e) {
+      updSay('could not update: ' + e.message, 'err');
+      updOffer = null; updBtn.textContent = 'UPDATE THE APP';
+    } finally { updBusy = false; updBtn.disabled = false; }
+  });
 
   // ---- API key ring panels: masked list, active radio, test/test-all,
   // delete, revive, import. States and glyphs follow Key_Tester's model
@@ -789,8 +925,8 @@
       const { upload_url } = await up.json();
       return fetch(AAI_BASE + '/v2/transcript', {
         method: 'POST', headers: { 'authorization': key, 'content-type': 'application/json' },
-        body: JSON.stringify({ audio_url: upload_url, speech_model: getAaiModel() })
-      });
+        body: JSON.stringify({ audio_url: upload_url })   // no model: the probe asks about the key, not a model name
+      }).then(r => { if (r.ok) aaiDiscoverModels(key); return r; });
     }
   }
   function makeProbeWav() {
@@ -1066,18 +1202,18 @@
 
   // ---- AssemblyAI, mirrors the v3 app, upload then transcript then poll ----
   function aaiSpeechModels() {
-    const sel = getAaiModel();
-    const arr = [sel];
-    AAI_MODELS.forEach(m => { if (!arr.includes(m)) arr.push(m); });
-    return arr; // chosen model first, the rest as fallback for AssemblyAI
+    const sel = aaiResolve(getAaiChoice());
+    if (!sel) return null; // auto: AssemblyAI's own default list, always current
+    return [sel].concat(aaiNewestPerFamily().filter(m => m !== sel)); // chosen first, the newest of each other family as fallback
   }
   function aaiLangConfig() {
     const speech_models = aaiSpeechModels();
     const lang = activeLang();
-    if (lang === 'hr') return { language_code: 'hr', speech_models };
-    if (lang === 'auto') return { language_detection: true, speech_models };
-    return { language_code: 'en', speech_models };
+    const cfg = lang === 'hr' ? { language_code: 'hr' } : (lang === 'auto' ? { language_detection: true } : { language_code: 'en' });
+    if (speech_models) cfg.speech_models = speech_models;
+    return cfg;
   }
+  function aaiIsModelError(status, text) { return status === 400 && /speech_model/i.test(text || ''); }
   async function aaiError(res) {
     try { const j = await res.json(); return j.error || j.message || ('HTTP ' + res.status); }
     catch (e) { return 'HTTP ' + res.status; }
@@ -1098,13 +1234,30 @@
       }
       const upload_url = JSON.parse(up.responseText).upload_url;
 
-      const tr = await fetch(AAI_BASE + '/v2/transcript', {
+      const submit = () => fetch(AAI_BASE + '/v2/transcript', {
         method: 'POST',
         headers: { 'authorization': key, 'content-type': 'application/json' },
         body: JSON.stringify({ audio_url: upload_url, ...aaiLangConfig() })
       });
+      let tr = await submit();
       if (txCanceled(gen)) return { kind: 'canceled' };
-      if (!tr.ok) { const bodyText = await tr.text().catch(() => ''); return krClassify(tr.status, bodyText, tr.headers); }
+      let bodyText = tr.ok ? '' : await tr.text().catch(() => '');
+      if (aaiIsModelError(tr.status, bodyText)) {
+        // AssemblyAI renamed or retired a model: ask it for the full list (its own error's
+        // names if that fails), then send once more, resolved against the fresh list
+        statusFn('assembly ' + keyLabel + '  \u00B7  model names changed, updating them');
+        if (!(await aaiDiscoverModels(key))) aaiRemember(aaiParseModels(bodyText));
+        tr = await submit();
+        bodyText = tr.ok ? '' : await tr.text().catch(() => '');
+        if (aaiIsModelError(tr.status, bodyText)) {
+          // last resort: no model at all, AssemblyAI's own default, and the choice becomes auto
+          localStorage.setItem('whisper_aai_model', AAI_AUTO); renderAaiModels(); updateBottomBar();
+          tr = await submit();
+          bodyText = tr.ok ? '' : await tr.text().catch(() => '');
+        }
+        if (txCanceled(gen)) return { kind: 'canceled' };
+      }
+      if (!tr.ok) return krClassify(tr.status, bodyText, tr.headers);
       const { id } = await tr.json();
 
       const procStart = performance.now();

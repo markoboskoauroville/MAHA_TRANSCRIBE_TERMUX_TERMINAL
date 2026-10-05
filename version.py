@@ -11,6 +11,8 @@ it without importing app.py itself -- app.py imports selfupdate.py, and a
 module that imports the thing that imports it is a circular import.
 v5 (13.9.2026): portpick pulled back level with its copies (TIME_WAIT is free) and given the live port registry
     (ports.md §3); the page opens in Chrome, bounded by timeout.
+v6 (5.10.2026): AssemblyAI model names are learned from AssemblyAI (a choice follows its family's
+    newest version, auto sends none, a refused model heals itself); UPDATE THE APP button in settings.
 """
 
-APP_VERSION = 5
+APP_VERSION = 6

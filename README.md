@@ -63,7 +63,7 @@ copy of itself, which it recognises by name rather than guessing.
 | `console.py` | the terminal dashboard `transcribe` draws while it runs |
 | `requirements.txt` | Flask, installed into a private `.venv` |
 | `transcribe` | starts the app |
-| `transcribe-update` | pulls the latest version and refreshes dependencies |
+| `transcribe-update` | pulls the latest version and refreshes dependencies (or UPDATE THE APP in settings) |
 | `install-termux.sh` | one-line installer for Termux |
 | `install-terminal.sh` | one-line installer for a regular terminal |
 
@@ -116,3 +116,28 @@ Two things it does that opening the file directly cannot:
   rule of the day for every app on the phone.
 - portpick.py and the opener were pulled level with the source in MAHA_TRANSCRIBE_TERMUX_TERMINAL
   (the TIME_WAIT fix and the timeout bound had lived only in copies). Version 5.
+
+## 5.10.2026: AssemblyAI model names that look after themselves, and UPDATE THE APP (v6)
+
+AssemblyAI retired the old `speech_model` field and renamed `universal-3-pro` to `universal-3-5-pro`. The key
+test still sent the old field, so it failed with *"The speech_model parameter is deprecated"*. The page no
+longer trusts any model name written in this file:
+
+- **The list comes from AssemblyAI.** An unknown name is refused with the full list of valid ones, free
+  and with no job made. The page asks once a day and after every good key test, and keeps the answer in
+  the browser (`whisper_aai_known`). Settings shows the list and the date it was read.
+- **A choice is a family, not a version.** Picking `universal-3-5-pro` stores `universal-#-pro`, and that
+  always resolves to the newest member AssemblyAI lists. When `universal-4-pro` appears, it is used with no
+  update needed. An older saved exact name is converted the same way.
+- **auto** sends no model at all, and AssemblyAI uses whatever it currently thinks is best.
+- **Self-healing.** If a submit is refused over a model, the page asks for the list, sends again once, and
+  as a last resort sends with no model and switches the choice to auto.
+- The key test sends no model, so it only ever tests the key.
+
+**UPDATE THE APP** sits at the top of Settings next to the version. The first press checks GitHub (the
+same `selfupdate.py` the console's U key uses) and says whether it is up to date or what is new. A second
+press pulls, refreshes dependencies and restarts the server on the same port, and the page reloads by
+itself. `transcribe-update` in a terminal still works.
+
+A restart (R, U, or the button) used to carry Flask's listening socket through `execv`. The old port then
+hung and the new server moved one port up. `app.py` now closes inherited descriptors before restarting.
